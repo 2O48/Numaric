@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Bundle 标识符：辅助功能授权的唯一凭证，不能乱改 -->
+    <key>CFBundleIdentifier</key>
+    <string>com.yourname.numaric</string>
+
+    <key>CFBundleName</key>
+    <string>Numaric</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>Numaric</string>
+
+    <key>CFBundleExecutable</key>
+    <string>Numaric</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+
+    <!-- 不在 Dock 显示图标（状态栏工具） -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <!-- 声明需要辅助功能权限 -->
+    <key>NSAccessibilityUsageDescription</key>
+    <string>Numaric 需要辅助功能权限，才能监听和转发键盘事件。</string>
+
+    <!-- 最低系统版本 -->
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+</dict>
+</plist>
