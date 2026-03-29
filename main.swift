@@ -1,41 +1,21 @@
 // main.swift
 // 编译：swiftc main.swift -framework Carbon -framework Cocoa -o Numaric
 //
-// 首次使用步骤：
-// 1. 编译后把二进制放到固定路径，例如 /usr/local/bin/Numaric（路径变化会导致权限失效）
-// 2. 运行一次，程序会弹出辅助功能权限提示
-// 3. 在「系统设置→隐私与安全性→辅助功能」中开启 Numaric
-// 4. 退出程序，重新运行（授权后需重启才能完全生效）
+// 三种模式：
+//   字母模式（默认）：所有按键放行，不拦截任何输入
+//   小键盘模式：快捷键切换进入，kKeyMap 映射生效（数字/运算符）
+//   方向键模式：在小键盘模式下从菜单勾选，kNavMap 映射生效，同时吞掉所有
+//              kKeyMap 覆盖的按键（确保不会输出字母/数字）
 //
-// 日志：~/numaric.log，可用 tail -f ~/numaric.log 实时查看
+// 关闭小键盘时自动关闭方向键模式。
+// "使用方向键"菜单项在小键盘模式关闭时为灰色不可点击。
 
 import Carbon
 import Cocoa
 
 // ─────────────────────────────────────────────────────────
-// MARK: - 日志
+// MARK: - 日志（默认关闭，取消注释可启用）
 // ─────────────────────────────────────────────────────────
-
-// private let kLogURL: URL = FileManager.default
-//     .homeDirectoryForCurrentUser.appendingPathComponent("numaric.log")
-// private let logQ = DispatchQueue(label: "log", qos: .utility)
-
-// func log(_ msg: String) {
-//     logQ.async {
-//         let f = DateFormatter()
-//         f.dateFormat = "HH:mm:ss.SSS"
-//         let line = "[\(f.string(from: Date()))] \(msg)\n"
-//         fputs(line, stderr)
-//         guard let data = line.data(using: .utf8) else { return }
-//         if let fh = try? FileHandle(forWritingTo: kLogURL) {
-//             defer { try? fh.close() }
-//             fh.seekToEndOfFile()
-//             fh.write(data)
-//         } else {
-//             try? data.write(to: kLogURL)
-//         }
-//     }
-// }
 
 @inline(__always)
 func log(_ _: String) {}
@@ -50,19 +30,41 @@ private let kModMask: UInt64 =
     CGEventFlags.maskCommand.rawValue | CGEventFlags.maskAlternate.rawValue
     | CGEventFlags.maskShift.rawValue | CGEventFlags.maskControl.rawValue
 
+// 小键盘模式：keycode → 输出字符串
 private let kKeyMap: [Int64: String] = [
-    38: "1", 40: "2", 37: "3",
-    32: "4", 34: "5", 31: "6",
-    46: "0", 43: "00",
+    38: "1", 40: "2", 37: "3",   // J K L → 1 2 3
+    32: "4", 34: "5", 31: "6",   // U I O → 4 5 6
+    46: "0", 43: "00",           // M , → 0 00
+    44: "+",                     // / → +
+    41: "-",                     // ; → -
+    35: "*",                     // P → *
+    29: "/",                     // 0 → /
 ]
 
-private let kCharKC: [Character: CGKeyCode] = [
-    "0": CGKeyCode(kVK_ANSI_0), "1": CGKeyCode(kVK_ANSI_1),
-    "2": CGKeyCode(kVK_ANSI_2), "3": CGKeyCode(kVK_ANSI_3),
-    "4": CGKeyCode(kVK_ANSI_4), "5": CGKeyCode(kVK_ANSI_5),
-    "6": CGKeyCode(kVK_ANSI_6), "7": CGKeyCode(kVK_ANSI_7),
-    "8": CGKeyCode(kVK_ANSI_8), "9": CGKeyCode(kVK_ANSI_9),
+// 方向键模式：keycode → CGKeyCode（功能键）
+// 覆盖 kKeyMap 中的按键，同时还包含额外按键（8/9/7/.）
+// kNavMap 中出现的所有 keycode 在方向键模式下都会被拦截，不会透传字母/数字
+private let kNavMap: [Int64: CGKeyCode] = [
+    32: CGKeyCode(kVK_LeftArrow),      // U → ←
+    31: CGKeyCode(kVK_RightArrow),     // O → →
+    40: CGKeyCode(kVK_DownArrow),      // K → ↓
+    28: CGKeyCode(kVK_UpArrow),        // 8 → ↑
+    26: CGKeyCode(kVK_Home),           // 7 → Home
+    38: CGKeyCode(kVK_End),            // J → End
+    25: CGKeyCode(kVK_PageUp),         // 9 → Page Up
+    37: CGKeyCode(kVK_PageDown),       // L → Page Down
+    46: CGKeyCode(kVK_Help),           // M → Insert (Help)
+    47: CGKeyCode(kVK_ForwardDelete),  // . → Delete（前向删除）
 ]
+
+// 方向键模式下需要"静默吞掉"的 keycode 集合：
+// = kKeyMap 中有但 kNavMap 中没有的键（避免它们输出字符）
+// 例如 I(34)→5、,(43)→00、/(44)→+、;(41)→-、P(35)→*、0(29)→/
+private let kNavSilentSet: Set<Int64> = {
+    let navKeys = Set(kNavMap.keys)
+    let numKeys = Set(kKeyMap.keys)
+    return numKeys.subtracting(navKeys)
+}()
 
 // ─────────────────────────────────────────────────────────
 // MARK: - CGEvent Tap 顶层回调
@@ -88,17 +90,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var tap: CFMachPort?
     private var tapSrc: CFRunLoopSource?
 
-    private(set) var isEnabled = false
+    // 模式状态
+    private(set) var isEnabled = false      // 小键盘模式
+    private(set) var isNavEnabled = false   // 方向键模式（仅在 isEnabled 时有效）
 
+    // 快捷键
     var hotMods: UInt64 = 0
     var hotCode: UInt32 = 0
 
+    // 设置窗口
     private var settingsWin: NSWindow?
     private weak var keyField: NSTextField?
     private weak var recBtn: NSButton?
     private weak var recHint: NSTextField?
 
-    // [FIX] 使用原子操作保证录制状态线程安全，避免多次回调竞争
+    // 录制状态
     private var isRecording = false
     private var recMonitorLocal: Any?
     private var recMonitorGlobal: Any?
@@ -106,10 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // ── 启动 ─────────────────────────────────────────────
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // try? "=== Numaric 启动 ===\n".data(using: .utf8)?.write(to: kLogURL)
         log("启动 pid=\(ProcessInfo.processInfo.processIdentifier)")
-        log("路径: \(ProcessInfo.processInfo.arguments[0])")
-
         NSApp.setActivationPolicy(.accessory)
         loadSettings()
         buildStatusBar()
@@ -127,37 +130,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             accessibilityDescription: "Numaric")
         statusItem.button?.image?.isTemplate = true
         refreshMenu()
-        log("状态栏已创建")
     }
 
     private func refreshMenu() {
         let menu = NSMenu()
 
+        // 开关小键盘
         let t1 = NSMenuItem(
             title: isEnabled ? "关闭小键盘" : "开启小键盘",
             action: #selector(actToggle), keyEquivalent: "")
         t1.target = self
         menu.addItem(t1)
-        menu.addItem(.separator())
-        let t2 = NSMenuItem(title: "设置…", action: #selector(actSettings), keyEquivalent: "")
+
+        // 方向键模式（仅在小键盘模式开启时可点击）
+        let t2 = NSMenuItem(
+            title: "使用方向键",
+            action: isEnabled ? #selector(actToggleNav) : nil,
+            keyEquivalent: "")
         t2.target = self
+        t2.state = isNavEnabled ? .on : .off
+        // 小键盘未开启时置灰
+        if !isEnabled {
+            t2.isEnabled = false
+        }
         menu.addItem(t2)
+
         menu.addItem(.separator())
-        let t3 = NSMenuItem(title: "退出", action: #selector(actQuit), keyEquivalent: "")
+
+        let t3 = NSMenuItem(title: "设置…", action: #selector(actSettings), keyEquivalent: "")
         t3.target = self
         menu.addItem(t3)
+
+        menu.addItem(.separator())
+
+        let t4 = NSMenuItem(title: "退出", action: #selector(actQuit), keyEquivalent: "")
+        t4.target = self
+        menu.addItem(t4)
 
         statusItem.menu = menu
     }
 
     @objc private func actToggle() { setEnabled(!isEnabled) }
+    @objc private func actToggleNav() { setNavEnabled(!isNavEnabled) }
     @objc private func actSettings() { openSettings() }
     @objc private func actQuit() { NSApp.terminate(nil) }
 
+    /// 切换小键盘模式；关闭时同时强制关闭方向键模式
     private func setEnabled(_ on: Bool) {
         isEnabled = on
+        if !on { isNavEnabled = false }
         refreshMenu()
         log("小键盘: \(on ? "开启" : "关闭")")
+    }
+
+    /// 切换方向键模式（仅在小键盘模式开启时调用）
+    private func setNavEnabled(_ on: Bool) {
+        guard isEnabled else { return }
+        isNavEnabled = on
+        refreshMenu()
+        log("方向键模式: \(on ? "开启" : "关闭")")
     }
 
     // ── Event Tap ────────────────────────────────────────
@@ -197,15 +228,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let t = tap else { return }
         CGEvent.tapEnable(tap: t, enable: false)
         CFMachPortInvalidate(t)
-        // [FIX] passRetained(self).release() 才能平衡 installTap 中的 passRetained
-        // 原来的 passUnretained(self).release() 会导致 over-release crash
         Unmanaged.passRetained(self).release()
         tap = nil
         if let s = tapSrc {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), s, .commonModes)
             tapSrc = nil
         }
-        log("removeTap 完成")
     }
 
     private func showAccessAlert() {
@@ -221,9 +249,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             a.addButton(withTitle: "稍后")
             if a.runModal() == .alertFirstButtonReturn {
                 NSWorkspace.shared.open(
-                    URL(
-                        string:
-                            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+                    URL(string:
+                        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
                     )!)
             }
         }
@@ -233,6 +260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func onEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
 
+        // tap 被系统暂停时重启
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             log("[TAP] 被系统暂停，重启")
             if let t = tap { CGEvent.tapEnable(tap: t, enable: true) }
@@ -246,8 +274,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return Unmanaged.passRetained(event)
         }
 
-        // [FIX] 录制中：tap 必须放行事件（passRetained），让 NSEvent global monitor 能收到
-        // 原来 return nil 会在事件链最顶端吞掉按键，global monitor 永远收不到任何按键
+        // 录制中：放行所有事件，让 monitor 能收到
         if isRecording {
             return Unmanaged.passRetained(event)
         }
@@ -255,24 +282,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let rawMods = event.flags.rawValue & kModMask
 
-        log("[TAP] kc=\(keyCode) mods=\(rawMods) enabled=\(isEnabled)")
+        log("[TAP] kc=\(keyCode) mods=\(rawMods) numpad=\(isEnabled) nav=\(isNavEnabled)")
 
-        // 切换快捷键
+        // ── 切换快捷键（任何模式下均响应）──
         if rawMods == hotMods && keyCode == Int64(hotCode) {
-            log("[TAP] 快捷键命中，切换")
+            log("[TAP] 快捷键命中，切换小键盘")
             DispatchQueue.main.async { self.setEnabled(!self.isEnabled) }
             return nil
         }
 
+        // ── 字母模式：完全放行 ──
         guard isEnabled else { return Unmanaged.passRetained(event) }
 
-        // 有非 Shift 修饰键时放行
+        // 有非 Shift 修饰键时放行（不干扰 Cmd/Ctrl/Alt 快捷键）
         if rawMods & ~CGEventFlags.maskShift.rawValue != 0 {
             return Unmanaged.passRetained(event)
         }
 
+        // ── 方向键模式 ──
+        if isNavEnabled {
+            // kNavMap 中的键 → 发送功能键
+            if let navKC = kNavMap[keyCode] {
+                log("[TAP] NAV \(keyCode)→kc\(navKC)")
+                postKey(navKC)
+                return nil
+            }
+            // kNavSilentSet 中的键（属于 kKeyMap 但不在 kNavMap）→ 静默吞掉，不输出任何字符
+            if kNavSilentSet.contains(keyCode) {
+                log("[TAP] NAV silent \(keyCode)")
+                return nil
+            }
+            // 其余按键（不在两个映射表中）→ 放行，允许正常输入
+            return Unmanaged.passRetained(event)
+        }
+
+        // ── 小键盘模式 ──
         if let text = kKeyMap[keyCode] {
-            log("[TAP] 映射 \(keyCode)→\"\(text)\"")
+            log("[TAP] NUM \(keyCode)→\"\(text)\"")
             postText(text)
             return nil
         }
@@ -280,20 +326,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return Unmanaged.passRetained(event)
     }
 
-    // ── 合成按键 ─────────────────────────────────────────
+    // ── 合成字符输出 ─────────────────────────────────────
 
+    /// 输出字符串：数字走虚拟键码，运算符等直接注入 Unicode
     private func postText(_ text: String) {
         let src = CGEventSource(stateID: .privateState)
         for ch in text {
-            guard let kc = kCharKC[ch] else { continue }
-            let dn = CGEvent(keyboardEventSource: src, virtualKey: kc, keyDown: true)
-            let up = CGEvent(keyboardEventSource: src, virtualKey: kc, keyDown: false)
-            dn?.setIntegerValueField(.eventSourceUserData, value: kSyntheticMark)
-            up?.setIntegerValueField(.eventSourceUserData, value: kSyntheticMark)
-            dn?.post(tap: .cgSessionEventTap)
-            up?.post(tap: .cgSessionEventTap)
+            if let kc = kCharKC[ch] {
+                let dn = CGEvent(keyboardEventSource: src, virtualKey: kc, keyDown: true)
+                let up = CGEvent(keyboardEventSource: src, virtualKey: kc, keyDown: false)
+                dn?.setIntegerValueField(.eventSourceUserData, value: kSyntheticMark)
+                up?.setIntegerValueField(.eventSourceUserData, value: kSyntheticMark)
+                dn?.post(tap: .cgSessionEventTap)
+                up?.post(tap: .cgSessionEventTap)
+            } else {
+                // UniChar = UInt16，直接注入 Unicode 码位
+                var uchar = UniChar(ch.unicodeScalars.first!.value)
+                let dn = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true)
+                let up = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false)
+                dn?.keyboardSetUnicodeString(stringLength: 1, unicodeString: &uchar)
+                up?.keyboardSetUnicodeString(stringLength: 1, unicodeString: &uchar)
+                dn?.setIntegerValueField(.eventSourceUserData, value: kSyntheticMark)
+                up?.setIntegerValueField(.eventSourceUserData, value: kSyntheticMark)
+                dn?.post(tap: .cgSessionEventTap)
+                up?.post(tap: .cgSessionEventTap)
+            }
         }
     }
+
+    /// 发送功能键（方向键/Home/End 等），不注入任何字符
+    private func postKey(_ kc: CGKeyCode) {
+        let src = CGEventSource(stateID: .privateState)
+        let dn = CGEvent(keyboardEventSource: src, virtualKey: kc, keyDown: true)
+        let up = CGEvent(keyboardEventSource: src, virtualKey: kc, keyDown: false)
+        dn?.setIntegerValueField(.eventSourceUserData, value: kSyntheticMark)
+        up?.setIntegerValueField(.eventSourceUserData, value: kSyntheticMark)
+        dn?.post(tap: .cgSessionEventTap)
+        up?.post(tap: .cgSessionEventTap)
+    }
+
+    // ── 数字字符 → 虚拟键码映射 ─────────────────────────
+
+    private let kCharKC: [Character: CGKeyCode] = [
+        "0": CGKeyCode(kVK_ANSI_0), "1": CGKeyCode(kVK_ANSI_1),
+        "2": CGKeyCode(kVK_ANSI_2), "3": CGKeyCode(kVK_ANSI_3),
+        "4": CGKeyCode(kVK_ANSI_4), "5": CGKeyCode(kVK_ANSI_5),
+        "6": CGKeyCode(kVK_ANSI_6), "7": CGKeyCode(kVK_ANSI_7),
+        "8": CGKeyCode(kVK_ANSI_8), "9": CGKeyCode(kVK_ANSI_9),
+    ]
 
     // ── 设置窗口 ─────────────────────────────────────────
 
@@ -305,7 +385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 360),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "Numaric 设置"
         w.isReleasedWhenClosed = false
@@ -349,19 +429,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recHint = hint
 
         let infoText =
-            "键位映射（小键盘开启时生效）：\n" + " J→1  K→2  L→3\n" + " U→4  I→5  O→6\n" + " M→0  ,→00\n"
-            + " 7 / 8 / 9 及其他键原样输入 \n 版本：1.0"
+            "模式说明：\n"
+            + "  字母模式（默认）：所有按键正常输入，不拦截任何字符\n"
+            + "  小键盘模式：快捷键切换，以下键位生效：\n"
+            + "    J→1   K→2   L→3\n"
+            + "    U→4   I→5   O→6\n"
+            + "    M→0   ,→00\n"
+            + "    /→+   ;→-   P→*   主键盘0→/\n"
+            + "  方向键模式：在小键盘模式下从菜单勾选，以下键位生效：\n"
+            + "    U→←   O→→   K→↓   8→↑\n"
+            + "    7→Home  J→End  9→PageUp  L→PageDown\n"
+            + "    M→Insert  .→Delete（前向）\n"
+            + "    （方向键模式下不输出任何字母或数字）\n"
+            + "版本：1.2"
         let info = mkLabel(infoText, 12, .regular, .secondaryLabelColor)
         info.maximumNumberOfLines = 0
-
-        // let logHint = mkLabel("日志: ~/numaric.log", 10, .regular, .tertiaryLabelColor)
 
         for v in [title, kl, kf, rb, hint, info] { root.addSubview(v) }
 
         let p: CGFloat = 20
         NSLayoutConstraint.activate([
-            root.widthAnchor.constraint(equalToConstant: 480),
-            root.heightAnchor.constraint(equalToConstant: 320),
+            root.widthAnchor.constraint(equalToConstant: 500),
+            root.heightAnchor.constraint(equalToConstant: 360),
 
             title.topAnchor.constraint(equalTo: root.topAnchor, constant: p),
             title.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: p),
@@ -383,9 +472,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             info.topAnchor.constraint(equalTo: hint.bottomAnchor, constant: 12),
             info.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: p),
             info.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -p),
-
-            // logHint.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
-            // logHint.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: p),
         ])
     }
 
@@ -414,98 +500,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recHint?.stringValue = "请按下想要的组合键（需含 ⌘/⌥/⌃/⇧）"
         log("[REC] 开始录制")
 
-        // Global monitor：捕获全局按键，包括含 ⌘ 的组合
-        // [FIX] tap 已改为在 isRecording 时放行事件，global monitor 现在可以正常收到所有按键
         recMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] ev in
             self?.handleRecEvent(ev)
         }
-
-        // Local monitor：兜底，捕获发给本 App 的按键
         recMonitorLocal = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] ev in
             self?.handleRecEvent(ev)
-            return nil  // 吞掉，避免触发菜单等
+            return nil
         }
 
         if recMonitorGlobal == nil {
-            log("[REC] global monitor 创建失败（权限不足？）")
-            recHint?.stringValue = "⚠️ 权限不足，global monitor 不可用，仅能录制不含 ⌘ 的快捷键"
+            recHint?.stringValue = "⚠️ 权限不足，仅能录制不含 ⌘ 的快捷键"
         }
 
-        // 10 秒超时
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
             guard let self, self.isRecording else { return }
-            log("[REC] 超时取消")
             self.cancelRec()
         }
     }
 
     private func handleRecEvent(_ ev: NSEvent) {
-        // [FIX] 使用 DispatchQueue.main 确保线程安全，避免 global/local monitor 同时触发
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isRecording else { return }
 
             let kc = ev.keyCode
             let mods = ev.modifierFlags.intersection([.command, .option, .shift, .control])
 
-            log("[REC] keyCode=\(kc) mods=\(mods.rawValue)")
-
             if kc == UInt16(kVK_Escape) {
-                log("[REC] ESC → 取消")
                 self.cancelRec()
                 return
             }
-
-            guard !mods.isEmpty else {
-                log("[REC] 无修饰键，忽略")
-                return
-            }
+            guard !mods.isEmpty else { return }
 
             var cgMods: UInt64 = 0
             if mods.contains(.command) { cgMods |= CGEventFlags.maskCommand.rawValue }
-            if mods.contains(.option) { cgMods |= CGEventFlags.maskAlternate.rawValue }
-            if mods.contains(.shift) { cgMods |= CGEventFlags.maskShift.rawValue }
+            if mods.contains(.option)  { cgMods |= CGEventFlags.maskAlternate.rawValue }
+            if mods.contains(.shift)   { cgMods |= CGEventFlags.maskShift.rawValue }
             if mods.contains(.control) { cgMods |= CGEventFlags.maskControl.rawValue }
 
             self.hotMods = cgMods
             self.hotCode = UInt32(kc)
-            log("[REC] 录制成功 mods=\(cgMods) code=\(kc) => \(self.hotkeyStr())")
             self.saveSettings()
             self.finishRec()
         }
     }
 
     private func finishRec() {
-        // [FIX] 先设 isRecording=false，再 cleanup，避免 cleanup 后回调再次触发
         isRecording = false
         cleanupRecMonitors()
         recBtn?.title = "录制"
         keyField?.stringValue = hotkeyStr()
         keyField?.textColor = .labelColor
         recHint?.stringValue = ""
-        log("[REC] 结束，当前快捷键: \(hotkeyStr())")
     }
 
     private func cancelRec() {
         guard isRecording || recMonitorLocal != nil || recMonitorGlobal != nil else { return }
-        // [FIX] 先设 isRecording=false，再 cleanup
         isRecording = false
         cleanupRecMonitors()
         recBtn?.title = "录制"
         keyField?.stringValue = hotkeyStr()
         keyField?.textColor = .labelColor
         recHint?.stringValue = ""
-        log("[REC] 已取消")
     }
 
     private func cleanupRecMonitors() {
-        if let m = recMonitorGlobal {
-            NSEvent.removeMonitor(m)
-            recMonitorGlobal = nil
-        }
-        if let m = recMonitorLocal {
-            NSEvent.removeMonitor(m)
-            recMonitorLocal = nil
-        }
+        if let m = recMonitorGlobal { NSEvent.removeMonitor(m); recMonitorGlobal = nil }
+        if let m = recMonitorLocal  { NSEvent.removeMonitor(m); recMonitorLocal = nil }
     }
 
     // ── 持久化 ───────────────────────────────────────────
@@ -514,15 +574,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let d = UserDefaults.standard
         if let s = d.string(forKey: "hkMods"), let v = UInt64(s) {
             hotMods = v
-            log("loadSettings hkMods=\(v) (UserDefaults)")
         } else {
             hotMods = CGEventFlags.maskCommand.rawValue | CGEventFlags.maskAlternate.rawValue
-            log("loadSettings hkMods=默认值\(hotMods)")
         }
-
         let kc = d.integer(forKey: "hkCode")
         hotCode = kc > 0 ? UInt32(kc) : UInt32(kVK_ANSI_K)
-        log("loadSettings hkCode=\(hotCode) => \(hotkeyStr())")
+        log("loadSettings => \(hotkeyStr())")
     }
 
     private func saveSettings() {
@@ -530,19 +587,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         d.set(String(hotMods), forKey: "hkMods")
         d.set(Int(hotCode), forKey: "hkCode")
         d.synchronize()
-        let v1 = d.string(forKey: "hkMods") ?? "nil"
-        let v2 = d.integer(forKey: "hkCode")
-        log("saveSettings hkMods=\(hotMods) hkCode=\(hotCode) | 回读: \(v1)/\(v2)")
     }
 
-    // ── 显示字符串 ───────────────────────────────────────
+    // ── 快捷键显示字符串 ─────────────────────────────────
 
     func hotkeyStr() -> String {
         var s = ""
-        if hotMods & CGEventFlags.maskControl.rawValue != 0 { s += "⌃" }
+        if hotMods & CGEventFlags.maskControl.rawValue   != 0 { s += "⌃" }
         if hotMods & CGEventFlags.maskAlternate.rawValue != 0 { s += "⌥" }
-        if hotMods & CGEventFlags.maskShift.rawValue != 0 { s += "⇧" }
-        if hotMods & CGEventFlags.maskCommand.rawValue != 0 { s += "⌘" }
+        if hotMods & CGEventFlags.maskShift.rawValue     != 0 { s += "⇧" }
+        if hotMods & CGEventFlags.maskCommand.rawValue   != 0 { s += "⌘" }
         s += keyName(hotCode)
         return s
     }
@@ -585,9 +639,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case kVK_ANSI_7: return "7"
         case kVK_ANSI_8: return "8"
         case kVK_ANSI_9: return "9"
-        case kVK_Space: return "Space"
+        case kVK_Space:  return "Space"
         case kVK_Return: return "↩"
-        case kVK_Tab: return "⇥"
+        case kVK_Tab:    return "⇥"
         default: return "[\(c)]"
         }
     }

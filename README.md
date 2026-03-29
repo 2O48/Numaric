@@ -1,4 +1,6 @@
-# Numaric - Mac小键盘切换工具
+![Icon](Numaric-macOS-Default-1024x1024@1x.png)
+
+# Numaric - Mac小键盘切换工具 (100% Vibe Coding)
 
 ## 功能
 
@@ -18,7 +20,7 @@
 
 ---
 
-# Numaric - Mac Numpad Switcher
+# Numaric - Mac Numpad Switcher (100% Vibe Coding)
 
 ## Features
 
