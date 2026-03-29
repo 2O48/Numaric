@@ -1,4 +1,4 @@
-![Icon](Numaric-macOS-Default-1024x1024@1x.png)
+![Intro](Intro.png)
 
 # Numaric - Mac小键盘切换工具 (100% Vibe Coding)
 
