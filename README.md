@@ -6,7 +6,7 @@
 
 - 一键切换键盘特定键位为小键盘模式
 - 自定义切换快捷键（默认：Cmd+Opt+K）
-- 键位映射：J→1, K→2, L→3, U→4, I→5, O→6, M→0, 逗号→00
+- 键位映射：J→1, K→2, L→3, U→4, I→5, O→6, M→0, 逗号→00，/→+，;→-，P→*，0→/，以及方向键模式
 - 系统托盘运行，不占用Dock空间
 - 设置自动保存
 
@@ -26,7 +26,7 @@
 
 - One-click switch to numpad mode for specific keyboard keys
 - Customizable toggle shortcut (default: Cmd+Opt+K)
-- Key mapping: J→1, K→2, L→3, U→4, I→5, O→6, M→0, Comma→00
+- Key mapping: J→1, K→2, L→3, U→4, I→5, O→6, M→0, Comma→00, /→+, ;→-, P→*, 0→/, and arrow key mode
 - Runs in system tray, no Dock space occupied
 - Settings automatically saved
 
