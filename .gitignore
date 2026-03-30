@@ -2,6 +2,7 @@
 *.swp
 .DS_Store
 .history
+.vscode
 Numaric.app/
 genicns.md
 AppIcon.iconset

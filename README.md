@@ -17,6 +17,7 @@
 3. 点击"+"按钮，添加 Numaric 应用
 4. 勾选 Numaric 以授予辅助功能权限
 5. 启动应用，在系统托盘点击图标开始使用
+6. 如果提示“已损坏，无法打开。你应当将它移到废纸篓”，终端运行`sudo xattr -rd com.apple.quarantine`将app拖入并回车即可
 
 ---
 
@@ -37,3 +38,4 @@
 3. Click "+" button and add Numaric app
 4. Check Numaric to grant accessibility permissions
 5. Launch the app and click the icon in system tray to start using
+6. If you receive the message "is damaged and cannot be opened. You should move it to the trash," run `sudo xattr -rd com.apple.quarantine` in the terminal, drag the app file and press Enter
